@@ -1,0 +1,14 @@
+streamlit
+pillow
+pytesseract
+easyocr
+transformers
+torch
+sentence-transformers
+spacy
+pdf2image
+pdfplumber
+scikit-learn
+numpy
+pandas
+openpyxl
