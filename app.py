@@ -335,6 +335,13 @@ def main() -> None:
         file_path = _save_uploaded_file(uploaded_file)
         st.success(f"Saved uploaded file: {file_path}")
 
+        if file_path.lower().endswith(".pdf"):
+            st.info(
+                "PDF extraction on Streamlit Cloud uses a text-only fallback (no Poppler).
+" 
+                "For full OCR/table extraction, run this app locally with Poppler installed (e.g. `apt-get install poppler-utils`) or deploy to an environment with Poppler."
+            )
+
         pages = []
         donut_result = None
 
