@@ -313,15 +313,28 @@ def main() -> None:
 
         with st.spinner("Running OCR..."):
             if uploaded_file.type == "application/pdf" or file_path.lower().endswith(".pdf"):
-                from pdf2image import convert_from_path
+                try:
+                    from pdf2image import convert_from_path
 
-                pages = convert_from_path(file_path, dpi=300)
+                    pages = convert_from_path(file_path, dpi=300)
+                    use_pdfplumber_fallback = False
+                except Exception as e:
+                    # Poppler is not available on the Streamlit Cloud environment.
+                    # Fall back to pdfplumber-based text extraction.
+                    import pdfplumber
+
+                    use_pdfplumber_fallback = True
+                    pages = []
+                    with pdfplumber.open(file_path) as pdf:
+                        for p in pdf.pages:
+                            pages.append({"text": p.extract_text() or "", "page_number": p.page_number})
             else:
                 from PIL import Image
 
                 pages = [Image.open(file_path).convert("RGB")]
+                use_pdfplumber_fallback = False
 
-            if use_donut and pages:
+            if use_donut and pages and not use_pdfplumber_fallback:
                 try:
                     donut_result = extract_with_donut(pages[0])
                 except Exception as exc:
@@ -332,7 +345,16 @@ def main() -> None:
             # Fallback to EasyOCR for structure extraction
             ocr_results = []
             for idx, page in enumerate(pages, start=1):
-                ocr_results.append({"page": idx, "blocks": ocr_image(page)})
+                if use_pdfplumber_fallback:
+                    # pdfplumber provides text but no OCR boxes
+                    ocr_results.append(
+                        {
+                            "page": page.get("page_number", idx),
+                            "blocks": [{"text": page.get("text", ""), "confidence": None, "bbox": []}],
+                        }
+                    )
+                else:
+                    ocr_results.append({"page": idx, "blocks": ocr_image(page)})
 
         layout = parse_layout(
             ocr_results, donut_parsed=donut_result.get("parsed") if donut_result else None
