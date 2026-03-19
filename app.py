@@ -350,7 +350,12 @@ def main() -> None:
                     ocr_results.append(
                         {
                             "page": page.get("page_number", idx),
-                            "blocks": [{"text": page.get("text", ""), "confidence": None, "bbox": []}],
+                            "blocks": [{
+                                "text": page.get("text", ""),
+                                "confidence": None,
+                                # Provide a dummy bbox so that layout parsing includes this block.
+                                "bbox": [[0, 0], [0, 0], [0, 0], [0, 0]],
+                            }],
                         }
                     )
                 else:
