@@ -150,7 +150,6 @@ def _process_and_store(
 ) -> dict:
     """Process a file (OCR + layout + embeddings) and save it to storage."""
 
-    from pdf2image import convert_from_path
     from PIL import Image
 
     file_hash_val = file_hash(file_path)
@@ -161,8 +160,21 @@ def _process_and_store(
             "file_hash": file_hash_val,
         }
 
+    use_pdfplumber_fallback = False
+    pages = []
     if file_path.lower().endswith(".pdf"):
-        pages = convert_from_path(file_path, dpi=300)
+        try:
+            from pdf2image import convert_from_path
+
+            pages = convert_from_path(file_path, dpi=300)
+        except Exception:
+            # Poppler not available; fall back to pdfplumber text extraction
+            import pdfplumber
+
+            use_pdfplumber_fallback = True
+            with pdfplumber.open(file_path) as pdf:
+                for p in pdf.pages:
+                    pages.append({"text": p.extract_text() or "", "page_number": p.page_number})
     else:
         pages = [Image.open(file_path).convert("RGB")]
 
@@ -175,6 +187,21 @@ def _process_and_store(
 
     ocr_results = []
     for idx, page in enumerate(pages, start=1):
+        if use_pdfplumber_fallback and isinstance(page, dict):
+            ocr_results.append(
+                {
+                    "page": page.get("page_number", idx),
+                    "blocks": [
+                        {
+                            "text": page.get("text", ""),
+                            "confidence": None,
+                            "bbox": [[0, 0], [0, 0], [0, 0], [0, 0]],
+                        }
+                    ],
+                }
+            )
+            continue
+
         if use_trocr:
             trocr_lines = trocr_ocr(page)
             blocks = [
