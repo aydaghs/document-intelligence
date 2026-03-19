@@ -508,9 +508,21 @@ def main() -> None:
         else:
             entities = extract_entities(layout.get("text", ""))
 
+        # Summary generation (for display) - this runs independently of saving
+        summary_text = None
+        if use_summary:
+            if summarize_text is None:
+                summary_text = None
+            else:
+                with st.spinner("Generating summary..."):
+                    try:
+                        summary_text = summarize_text(layout.get("text", ""))
+                    except Exception:
+                        summary_text = None
+
         st.header("Extraction Results")
 
-        tabs = st.tabs(["Text", "Entities", "Tables", "JSON"])
+        tabs = st.tabs(["Text", "Summary", "Entities", "Tables", "JSON"])
 
         with tabs[0]:
             st.subheader("Extracted Text")
@@ -522,6 +534,26 @@ def main() -> None:
                 file_name=f"{os.path.splitext(uploaded_file.name)[0]}.txt",
                 mime="text/plain",
             )
+
+        with tabs[1]:
+            st.subheader("Summary")
+            if not use_summary:
+                st.info("Enable 'Generate summary' in the sidebar to see this.")
+            elif summarize_text is None:
+                st.warning(
+                    "Summarization is unavailable (missing transformers). "
+                    "Install transformers and restart to enable."
+                )
+            elif summary_text:
+                st.write(summary_text)
+                st.download_button(
+                    "Download summary",
+                    summary_text,
+                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_summary.txt",
+                    mime="text/plain",
+                )
+            else:
+                st.info("No summary generated.")
 
         with tabs[1]:
             st.subheader("Detected Entities")
