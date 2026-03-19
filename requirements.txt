@@ -6,3 +6,7 @@ numpy
 pandas
 scikit-learn
 openpyxl
+
+# Enable semantic search (sentence-transformers uses torch under the hood)
+sentence-transformers
+torch
