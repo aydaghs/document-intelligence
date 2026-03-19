@@ -191,10 +191,13 @@ def _process_and_store(
 
     summary = None
     if use_summary:
-        try:
-            summary = summarize_text(layout.get("text", ""))
-        except Exception:
+        if summarize_text is None:
             summary = None
+        else:
+            try:
+                summary = summarize_text(layout.get("text", ""))
+            except Exception:
+                summary = None
 
     storage.add_document(
         filename=filename,
@@ -325,7 +328,15 @@ def main() -> None:
         layout = parse_layout(
             ocr_results, donut_parsed=donut_result.get("parsed") if donut_result else None
         )
-        entities = extract_entities(layout.get("text", ""))
+
+        if extract_entities is None:
+            entities = []
+            st.warning(
+                "Entity extraction is disabled because spaCy is not installed. "
+                "Install spaCy to enable named entity recognition."
+            )
+        else:
+            entities = extract_entities(layout.get("text", ""))
 
         st.header("Extraction Results")
         col1, col2 = st.columns([2, 1])
