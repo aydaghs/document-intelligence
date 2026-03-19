@@ -75,7 +75,16 @@ def get_storage() -> DocumentStorage:
 def get_search():
     if SemanticSearch is None:
         return None
-    return SemanticSearch()
+
+    try:
+        return SemanticSearch()
+    except ImportError:
+        # Sentence-transformers is not installed in this environment.
+        return None
+    except Exception as e:
+        # Guard against any unexpected failure during semantic search initialization.
+        st.warning(f"Semantic search unavailable: {e}")
+        return None
 
 
 def _build_query_text(extracted: dict) -> str:
