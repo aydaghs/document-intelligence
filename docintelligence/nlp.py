@@ -42,6 +42,10 @@ def get_nlp(model: str = "en_core_web_sm") -> "Language":
 def extract_entities(text: str, model: str = "en_core_web_sm") -> List[Dict[str, str]]:
     """Extract entities from text using spaCy."""
 
+    if not _HAS_SPACY:
+        # spaCy isn't installed in this environment; return no entities.
+        return []
+
     nlp = get_nlp(model=model)
     doc = nlp(text)
     return [{"text": ent.text, "label": ent.label_} for ent in doc.ents]
@@ -49,6 +53,10 @@ def extract_entities(text: str, model: str = "en_core_web_sm") -> List[Dict[str,
 
 def extract_key_phrases(text: str, model: str = "en_core_web_sm") -> List[str]:
     """Extract simple noun chunks as key phrases."""
+
+    if not _HAS_SPACY:
+        # spaCy isn't installed in this environment; return no key phrases.
+        return []
 
     nlp = get_nlp(model=model)
     doc = nlp(text)
