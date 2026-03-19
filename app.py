@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import traceback
+from typing import Callable, Optional
 
 import pandas as pd
 import streamlit as st
@@ -96,6 +97,19 @@ def _build_query_text(extracted: dict) -> str:
     return "\n".join(query_parts)
 
 
+def _highlight_query(text: str, query: str) -> str:
+    if not query or not text:
+        return text
+    # Simple case-insensitive highlight for query terms
+    import re
+
+    def repl(match):
+        return f"**{match.group(0)}**"
+
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    return pattern.sub(repl, text)
+
+
 def _render_import_error() -> None:
     """Show import errors directly in Streamlit UI so Cloud logs are not required."""
 
@@ -147,6 +161,7 @@ def _process_and_store(
     use_summary: bool,
     skip_duplicates: bool,
     use_semantic_search: bool,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
     title: str | None = None,
 ) -> dict:
     """Process a file (OCR + layout + embeddings) and save it to storage."""
@@ -162,6 +177,7 @@ def _process_and_store(
         }
 
     use_pdfplumber_fallback = False
+    pdfplumber_tables = []
     pages = []
     if file_path.lower().endswith(".pdf"):
         try:
@@ -176,6 +192,13 @@ def _process_and_store(
             with pdfplumber.open(file_path) as pdf:
                 for p in pdf.pages:
                     pages.append({"text": p.extract_text() or "", "page_number": p.page_number})
+                    try:
+                        # Attempt table extraction (may be empty)
+                        tables = p.extract_tables()
+                        if tables:
+                            pdfplumber_tables.extend(tables)
+                    except Exception:
+                        pass
     else:
         pages = [Image.open(file_path).convert("RGB")]
 
@@ -187,7 +210,11 @@ def _process_and_store(
             donut_result = None
 
     ocr_results = []
+    total_pages = len(pages)
     for idx, page in enumerate(pages, start=1):
+        if progress_callback:
+            progress_callback(idx, total_pages, f"Processing page {idx}/{total_pages}")
+
         if use_pdfplumber_fallback and isinstance(page, dict):
             ocr_results.append(
                 {
@@ -216,6 +243,11 @@ def _process_and_store(
     layout = parse_layout(
         ocr_results, donut_parsed=donut_result.get("parsed") if donut_result else None
     )
+
+    # If we collected pdfplumber tables, add them to the layout output.
+    if pdfplumber_tables:
+        for t in pdfplumber_tables:
+            layout["tables"].append({"source": "pdfplumber", "row_count": len(t), "rows": t})
 
     query_text = _build_query_text(layout)
 
@@ -267,6 +299,12 @@ def main() -> None:
     uploaded_file = st.sidebar.file_uploader(
         "Upload a PDF or image",
         type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp"],
+    )
+
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload multiple files",
+        type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp"],
+        accept_multiple_files=True,
     )
 
     use_donut = st.sidebar.checkbox("Use Donut (layout-aware parsing)", value=False)
@@ -341,6 +379,46 @@ def main() -> None:
                 st.sidebar.subheader("Ingest log")
                 st.sidebar.table(log_rows)
 
+    # Handle multiple file uploads (drag-and-drop folder style)
+    if uploaded_files:
+        st.write("### Processing uploaded files")
+        file_log_rows = []
+        for uf in uploaded_files:
+            fp = _save_uploaded_file(uf)
+            st.write(f"- Saved: {fp}")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            def _on_progress(cur: int, total: int, msg: str) -> None:
+                progress_bar.progress(cur / max(1, total))
+                status_text.text(msg)
+
+            try:
+                result = _process_and_store(
+                    fp,
+                    uf.name,
+                    storage,
+                    search,
+                    use_donut,
+                    use_trocr,
+                    use_summary,
+                    skip_duplicates,
+                    use_semantic_search=use_semantic_search and semantic_search_available,
+                    progress_callback=_on_progress,
+                )
+                file_log_rows.append({
+                    "file": fp,
+                    "status": result.get("status"),
+                    "summary": result.get("summary"),
+                    "reason": result.get("reason"),
+                })
+            except Exception as e:
+                file_log_rows.append({"file": fp, "status": "error", "reason": str(e)})
+
+        st.markdown("---")
+        st.subheader("Upload log")
+        st.table(file_log_rows)
+
     if uploaded_file is None:
         st.info("Upload a PDF or scanned image to start extraction.")
     else:
@@ -349,10 +427,20 @@ def main() -> None:
 
         if file_path.lower().endswith(".pdf"):
             st.info(
-                "PDF extraction on Streamlit Cloud uses a text-only fallback (no Poppler).
-" 
+                "PDF extraction on Streamlit Cloud uses a text-only fallback (no Poppler). "
                 "For full OCR/table extraction, run this app locally with Poppler installed (e.g. `apt-get install poppler-utils`) or deploy to an environment with Poppler."
             )
+
+            # Try to render a preview of the first page (pdfplumber requires no Poppler for basic rendering)
+            try:
+                import pdfplumber
+
+                with pdfplumber.open(file_path) as pdf:
+                    if pdf.pages:
+                        pil_img = pdf.pages[0].to_image(resolution=150).original
+                        st.image(pil_img, caption="PDF preview (page 1)", use_column_width=True)
+            except Exception:
+                pass
 
         pages = []
         donut_result = None
@@ -421,25 +509,41 @@ def main() -> None:
             entities = extract_entities(layout.get("text", ""))
 
         st.header("Extraction Results")
-        col1, col2 = st.columns([2, 1])
 
-        with col1:
+        tabs = st.tabs(["Text", "Entities", "Tables", "JSON"])
+
+        with tabs[0]:
             st.subheader("Extracted Text")
-            st.text_area("Text", layout.get("text", ""), height=360)
+            text_content = layout.get("text", "")
+            st.text_area("Text", text_content, height=360)
+            st.download_button(
+                "Download text",
+                text_content,
+                file_name=f"{os.path.splitext(uploaded_file.name)[0]}.txt",
+                mime="text/plain",
+            )
 
+        with tabs[1]:
             st.subheader("Detected Entities")
             st.table(entities[:30])
 
-            if donut_result is not None:
-                st.subheader("Donut (layout parse) output")
-                st.json(donut_result)
-
+        with tabs[2]:
             st.subheader("Detected Tables")
-            for i, table in enumerate(layout.get("tables", []), start=1):
+            tables = layout.get("tables", [])
+            if not tables:
+                st.info("No tables detected.")
+            for i, table in enumerate(tables, start=1):
                 st.write(f"**Table {i} (rows={table.get('row_count')})**")
                 st.table(table.get("rows", []))
+                df = pd.DataFrame(table.get("rows", []))
+                st.download_button(
+                    f"Download Table {i} as CSV",
+                    df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_table_{i}.csv",
+                    mime="text/csv",
+                )
 
-        with col2:
+        with tabs[3]:
             st.subheader("JSON Output")
             json_output = {
                 "source_filename": uploaded_file.name,
@@ -449,10 +553,25 @@ def main() -> None:
                 "donut": donut_result,
             }
             st.json(json_output)
+            st.download_button(
+                "Download JSON",
+                json.dumps(json_output, indent=2),
+                file_name=f"{os.path.splitext(uploaded_file.name)[0]}.json",
+                mime="application/json",
+            )
 
-            st.subheader("Save / Search")
-            title = st.text_input("Title (optional)", value=uploaded_file.name)
-            if st.button("Save to Local DB"):
+        st.markdown("---")
+        st.subheader("Save / Search")
+        title = st.text_input("Title (optional)", value=uploaded_file.name)
+        if st.button("Save to Local DB"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            def _on_progress(cur: int, total: int, msg: str) -> None:
+                progress_bar.progress(cur / max(1, total))
+                status_text.text(msg)
+
+            with st.spinner("Saving document..."):
                 result = _process_and_store(
                     file_path,
                     uploaded_file.name,
@@ -462,52 +581,54 @@ def main() -> None:
                     use_trocr,
                     use_summary,
                     skip_duplicates,
-                    title=title,
+                    use_semantic_search=use_semantic_search and semantic_search_available,
+                    progress_callback=_on_progress,
                 )
-                status = result.get("status")
-                if status == "skipped":
-                    st.info("Document was already ingested (skipped).")
-                elif status == "saved":
-                    st.success("Saved document to local datastore.")
-                else:
-                    st.warning(f"Document processing result: {status}")
+            status = result.get("status")
+            if status == "skipped":
+                st.info("Document was already ingested (skipped).")
+            elif status == "saved":
+                st.success("Saved document to local datastore.")
+            else:
+                st.warning(f"Document processing result: {status}")
 
-            st.markdown("---")
-            st.subheader("Find Similar Documents")
-            if not use_semantic_search:
-                st.info("Semantic search is disabled. Enable it in the sidebar to search stored documents.")
-            elif search is None:
-                st.warning(
-                    "Semantic search is unavailable (missing sentence-transformers). "
-                    "Install sentence-transformers and restart to enable."
-                )
-            elif st.button("Search stored documents"):
-                docs = storage.get_documents_with_embeddings()
-                if not docs:
-                    st.warning("No previously stored documents found. Save a document first.")
-                else:
-                    candidate_embeddings = []
-                    candidates = []
-                    for d in docs:
-                        emb_blob = d.get("embedding")
-                        if emb_blob is None:
-                            continue
-                        candidate_embeddings.append(search.deserialize_embedding(emb_blob))
-                        candidates.append(d)
-                    candidate_embeddings = list(candidate_embeddings)
-                    if candidate_embeddings:
-                        import numpy as np
+        st.markdown("---")
+        st.subheader("Search stored documents")
+        query_text = st.text_input("Search query", value="")
+        if not use_semantic_search:
+            st.info("Semantic search is disabled. Enable it in the sidebar to search stored documents.")
+        elif search is None:
+            st.warning(
+                "Semantic search is unavailable (missing sentence-transformers). "
+                "Install sentence-transformers and restart to enable."
+            )
+        elif st.button("Search"):
+            docs = storage.get_documents_with_embeddings()
+            if not docs:
+                st.warning("No previously stored documents found. Save a document first.")
+            else:
+                candidate_embeddings = []
+                candidates = []
+                for d in docs:
+                    emb_blob = d.get("embedding")
+                    if emb_blob is None:
+                        continue
+                    candidate_embeddings.append(search.deserialize_embedding(emb_blob))
+                    candidates.append(d)
+                candidate_embeddings = list(candidate_embeddings)
+                if candidate_embeddings:
+                    import numpy as np
 
-                        candidate_embeddings = np.vstack(candidate_embeddings)
-                        query_text = _build_query_text(layout)
-                        results = search.search(query_text, candidates, candidate_embeddings, top_k=5)
-                        for r in results:
-                            st.write(
-                                f"**{r.get('title') or r.get('filename')}** (score: {r.get('score'):.3f})"
-                            )
-                            st.write(r.get("text")[:500] + "...")
-                    else:
-                        st.warning("No document embeddings found. Please save a document with embedding.")
+                    candidate_embeddings = np.vstack(candidate_embeddings)
+                    results = search.search(query_text, candidates, candidate_embeddings, top_k=5)
+                    for r in results:
+                        st.write(
+                            f"**{r.get('title') or r.get('filename')}** (score: {r.get('score'):.3f})"
+                        )
+                        snippet = r.get("text", "")[:500]
+                        st.markdown(_highlight_query(snippet, query_text))
+                else:
+                    st.warning("No document embeddings found. Please save a document with embedding.")
 
     # Document comparison / change detection
     st.sidebar.markdown("---")
@@ -553,6 +674,7 @@ def main() -> None:
                             use_trocr,
                             use_summary,
                             skip_duplicates=False,
+                            use_semantic_search=use_semantic_search and semantic_search_available,
                             title=doc_a_data.get("title"),
                         )
                         st.success(f"Repaired document A: {res.get('status')}")
@@ -571,6 +693,7 @@ def main() -> None:
                             use_trocr,
                             use_summary,
                             skip_duplicates=False,
+                            use_semantic_search=use_semantic_search and semantic_search_available,
                             title=doc_b_data.get("title"),
                         )
                         st.success(f"Repaired document B: {res.get('status')}")
