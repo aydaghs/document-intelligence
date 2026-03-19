@@ -146,6 +146,7 @@ def _process_and_store(
     use_trocr: bool,
     use_summary: bool,
     skip_duplicates: bool,
+    use_semantic_search: bool,
     title: str | None = None,
 ) -> dict:
     """Process a file (OCR + layout + embeddings) and save it to storage."""
@@ -219,7 +220,7 @@ def _process_and_store(
     query_text = _build_query_text(layout)
 
     emb = None
-    if search is not None:
+    if use_semantic_search and search is not None:
         try:
             emb = search.embed([query_text])[0]
         except Exception:
@@ -273,9 +274,19 @@ def main() -> None:
     use_summary = st.sidebar.checkbox("Generate summary (3 sentences)", value=True)
     skip_duplicates = st.sidebar.checkbox("Skip files already ingested (by hash)", value=True)
     preview_tables = st.sidebar.checkbox("Preview tables during ingestion", value=False)
+    use_semantic_search = st.sidebar.checkbox(
+        "Enable semantic search (sentence-transformers)", value=True
+    )
 
     storage = get_storage()
     search = get_search()
+
+    semantic_search_available = search is not None
+    if use_semantic_search and not semantic_search_available:
+        st.sidebar.warning(
+            "Semantic search is not available because sentence-transformers is not installed. "
+            "Install sentence-transformers and rebuild the app to enable it."
+        )
 
     st.sidebar.markdown("### Batch ingest folder")
     ingest_folder = st.sidebar.text_input("Folder path (local)", value="")
@@ -304,6 +315,7 @@ def main() -> None:
                             use_trocr,
                             use_summary,
                             skip_duplicates,
+                            use_semantic_search=use_semantic_search and semantic_search_available,
                         )
                         status = result.get("status", "saved")
                         log_rows.append({
@@ -462,7 +474,9 @@ def main() -> None:
 
             st.markdown("---")
             st.subheader("Find Similar Documents")
-            if search is None:
+            if not use_semantic_search:
+                st.info("Semantic search is disabled. Enable it in the sidebar to search stored documents.")
+            elif search is None:
                 st.warning(
                     "Semantic search is unavailable (missing sentence-transformers). "
                     "Install sentence-transformers and restart to enable."
