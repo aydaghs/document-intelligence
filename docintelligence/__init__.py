@@ -9,9 +9,10 @@ from .diff import diff_markdown, side_by_side_diff
 
 # Optional/extra features (may be unavailable if dependencies are missing)
 try:
-    from .nlp import extract_entities
+    from .nlp import extract_entities, extract_key_phrases
 except ImportError:  # pragma: no cover
     extract_entities = None  # type: ignore
+    extract_key_phrases = None  # type: ignore
 
 try:
     from .summarize import summarize_text
@@ -43,6 +44,7 @@ __all__ = [
     "diff_markdown",
     "side_by_side_diff",
     "extract_entities",
+    "extract_key_phrases",
     "summarize_text",
     "extract_with_donut",
     "trocr_ocr",
