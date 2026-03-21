@@ -38,6 +38,8 @@ try:
     except ImportError:
         trocr_ocr = None
 
+    from docintelligence import classify_document, CATEGORY_COLORS
+
 except Exception as e:
     IMPORT_ERROR = e
     DocumentStorage = None          # type: ignore
@@ -56,6 +58,8 @@ except Exception as e:
     embed_chunks = None             # type: ignore
     retrieve_chunks = None          # type: ignore
     answer_question = None          # type: ignore
+    classify_document = None        # type: ignore
+    CATEGORY_COLORS = {}            # type: ignore
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -255,6 +259,94 @@ def _build_query_text(extracted: dict) -> str:
         for row in t.get("rows", []):
             parts.append(" ".join(str(c) for c in row))
     return "\n".join(parts)
+
+
+def _draw_bboxes(image, blocks, dpi_scale: float = 1.0):
+    """Draw colored bounding boxes on a PIL image. Returns a new PIL image."""
+    try:
+        from PIL import ImageDraw, Image as _PILImage
+    except ImportError:
+        return image
+
+    img = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for block in blocks:
+        bbox = block.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        conf = block.get("confidence")
+        if conf is None:
+            color = (100, 149, 237)   # cornflower blue — unknown confidence
+        elif conf > 0.8:
+            color = (50, 200, 50)     # green — high confidence
+        elif conf > 0.5:
+            color = (255, 165, 0)     # orange — medium confidence
+        else:
+            color = (220, 50, 50)     # red — low confidence
+        xs = [pt[0] * dpi_scale for pt in bbox]
+        ys = [pt[1] * dpi_scale for pt in bbox]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        draw.rectangle([x0, y0, x1, y1], outline=color, width=2)
+    return img
+
+
+def _render_timeline(entities: list) -> None:
+    """Render a date timeline from extracted DATE entities using altair."""
+    date_ents = [e for e in (entities or []) if e.get("label") == "DATE" and e.get("text")]
+    if not date_ents:
+        st.info("No date entities detected for timeline.")
+        return
+
+    import re
+
+    def _try_parse(s: str):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y",
+                    "%d %B %Y", "%Y", "%B %Y", "%b %Y"):
+            try:
+                import datetime
+                return datetime.datetime.strptime(s.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    rows = []
+    for e in date_ents:
+        dt = _try_parse(e["text"])
+        rows.append({"date_text": e["text"], "parsed": dt})
+
+    parseable = [r for r in rows if r["parsed"] is not None]
+    unparseable = [r["date_text"] for r in rows if r["parsed"] is None]
+
+    if parseable:
+        try:
+            import altair as alt
+            import pandas as _pd2
+            df_t = _pd2.DataFrame({
+                "Date": [r["parsed"] for r in parseable],
+                "Label": [r["date_text"] for r in parseable],
+                "y": [0] * len(parseable),
+            })
+            chart = (
+                alt.Chart(df_t)
+                .mark_point(size=120, filled=True)
+                .encode(
+                    x=alt.X("Date:T", title="Date"),
+                    y=alt.Y("y:Q", axis=None),
+                    tooltip=["Label:N", "Date:T"],
+                    color=alt.value("#4ECDC4"),
+                )
+                .properties(height=120, title="Document Date Timeline")
+            )
+            st.altair_chart(chart, use_container_width=True)
+        except ImportError:
+            dates_sorted = sorted(parseable, key=lambda r: r["parsed"])
+            st.write(" → ".join(r["date_text"] for r in dates_sorted))
+    else:
+        st.write("**Dates found (could not parse to timeline):**")
+        st.write(", ".join(r["date_text"] for r in rows))
+
+    if unparseable:
+        st.caption(f"Additional date mentions (format not parsed): {', '.join(unparseable)}")
 
 
 def _process_and_store(
@@ -540,11 +632,15 @@ def main() -> None:
         use_pdfplumber_fallback = False
         pdfplumber_tables = []
         pages = []
+        page1_img = None          # PIL image of page 1 for visualization
+        bbox_dpi_scale = 1.0      # scale factor: bbox coords → page1_img pixels
 
         if is_pdf:
             try:
                 from pdf2image import convert_from_path
                 pages = convert_from_path(file_path, dpi=300)
+                # EasyOCR bboxes will be in 300-DPI pixel space — same as pages[0]
+                bbox_dpi_scale = 1.0
             except Exception:
                 import pdfplumber as _plumber
                 use_pdfplumber_fallback = True
@@ -557,9 +653,21 @@ def main() -> None:
                                 pdfplumber_tables.extend(tbls)
                         except Exception:
                             pass
+                # Render page 1 at 150 DPI for visualization; pdfplumber bboxes are in PDF points
+                try:
+                    import pdfplumber as _plumber2
+                    with _plumber2.open(file_path) as _pdf2:
+                        page1_img = _pdf2.pages[0].to_image(resolution=150).original
+                    bbox_dpi_scale = 150 / 72  # PDF points → 150-DPI pixels
+                except Exception:
+                    pass
         else:
             from PIL import Image as _Image
             pages = [_Image.open(file_path).convert("RGB")]
+
+        # Capture page 1 image for bbox visualization (pdf2image path)
+        if pages and not use_pdfplumber_fallback and page1_img is None:
+            page1_img = pages[0]
 
         donut_result = None
         if use_donut and pages and extract_with_donut is not None and not use_pdfplumber_fallback:
@@ -603,9 +711,36 @@ def main() -> None:
             except Exception:
                 summary_text = None
 
+    # Classification
+    classification = None
+    if extracted_text.strip() and classify_document is not None:
+        with st.spinner("Classifying document…"):
+            try:
+                classification = classify_document(extracted_text, uploaded_file.name)
+            except Exception:
+                classification = None
+
+    # ── classification badge ──
+    if classification:
+        cat = classification.get("category", "Other")
+        conf = classification.get("confidence", 0.0)
+        lang = classification.get("language", "")
+        color = CATEGORY_COLORS.get(cat, "#BDC3C7")
+        badge_html = (
+            f'<span style="background:{color};padding:5px 14px;border-radius:6px;'
+            f'font-weight:bold;font-size:1rem;color:#222">{cat}</span>'
+            f'&nbsp;&nbsp;<span style="color:gray">Confidence: <b>{conf:.0%}</b>'
+            + (f" &nbsp;·&nbsp; Language: <b>{lang}</b>" if lang and lang != "Unknown" else "")
+            + "</span>"
+        )
+        st.markdown(badge_html, unsafe_allow_html=True)
+
     # ── results tabs ──
     st.header("📊 Extraction Results")
-    tabs = st.tabs(["📝 Text", "💡 Summary", "🏷️ Entities", "📋 Tables", "💬 Chat", "🔧 JSON"])
+    tabs = st.tabs([
+        "📝 Text", "💡 Summary", "🏷️ Entities", "📋 Tables",
+        "🔍 Visualization", "🎯 Classification", "💬 Chat", "🔧 JSON",
+    ])
 
     with tabs[0]:
         st.subheader("Extracted Text")
@@ -672,11 +807,156 @@ def main() -> None:
                     mime="text/csv",
                 )
 
+    # ── tab: Visualization ──
     with tabs[4]:
+        st.subheader("Document Visualization")
+
+        # Collect all OCR blocks for page 1
+        page1_blocks = ocr_results[0]["blocks"] if ocr_results else []
+        real_blocks = [b for b in page1_blocks if any(
+            any(abs(c) > 1 for c in pt) for pt in b.get("bbox", [])
+        )]
+
+        # Bounding box overlay
+        st.markdown("#### OCR Bounding Boxes")
+        st.caption("🟢 High confidence  🟠 Medium  🔴 Low  🔵 Unknown")
+        if page1_img is not None and real_blocks:
+            try:
+                bbox_img = _draw_bboxes(page1_img, real_blocks, dpi_scale=bbox_dpi_scale)
+                st.image(bbox_img, caption="Page 1 — OCR bounding boxes", use_column_width=True)
+            except Exception as exc:
+                st.warning(f"Could not render bounding boxes: {exc}")
+        elif page1_img is not None:
+            st.info("No positioned OCR blocks to overlay (text PDF with no word-level bbox).")
+            st.image(page1_img, caption="Page 1 preview", use_column_width=True)
+        else:
+            st.info("Page image not available for overlay.")
+
+        # Block position scatter map
+        st.markdown("#### Text Block Layout Map")
+        if real_blocks:
+            try:
+                import altair as alt
+                import pandas as _pd3
+                scatter_rows = []
+                for b in real_blocks:
+                    bbox = b.get("bbox", [])
+                    if len(bbox) >= 4:
+                        x = float(bbox[0][0])
+                        y = float(bbox[0][1])
+                        w = abs(float(bbox[2][0]) - x)
+                        h = abs(float(bbox[2][1]) - y)
+                        conf = b.get("confidence")
+                        conf_label = (
+                            "High" if conf is not None and conf > 0.8 else
+                            "Medium" if conf is not None and conf > 0.5 else
+                            "Low" if conf is not None else "Unknown"
+                        )
+                        scatter_rows.append({
+                            "x": x, "y": y, "width": max(w, 4), "height": max(h, 4),
+                            "text": (b.get("text") or "")[:40],
+                            "confidence": conf_label,
+                        })
+                if scatter_rows:
+                    df_sc = _pd3.DataFrame(scatter_rows)
+                    color_scale = alt.Scale(
+                        domain=["High", "Medium", "Low", "Unknown"],
+                        range=["#32c832", "#ffa500", "#dc3232", "#6495ed"],
+                    )
+                    scatter = (
+                        alt.Chart(df_sc)
+                        .mark_point(filled=True, opacity=0.7)
+                        .encode(
+                            x=alt.X("x:Q", title="X position (pixels)", scale=alt.Scale(zero=True)),
+                            y=alt.Y("y:Q", title="Y position (pixels)",
+                                    scale=alt.Scale(reverse=True, zero=True)),
+                            size=alt.Size("width:Q", title="Block width", legend=None),
+                            color=alt.Color("confidence:N", scale=color_scale, title="Confidence"),
+                            tooltip=["text:N", "confidence:N", "x:Q", "y:Q"],
+                        )
+                        .properties(height=350, title="Text Block Positions")
+                    )
+                    st.altair_chart(scatter, use_container_width=True)
+            except ImportError:
+                st.info("Install `altair` for interactive scatter visualization.")
+        else:
+            st.info("No positioned blocks available for layout map.")
+
+        # Date timeline
+        st.markdown("#### Date Timeline")
+        _render_timeline(entities)
+
+    # ── tab: Classification ──
+    with tabs[5]:
+        st.subheader("Document Classification")
+        if classification is None:
+            st.info("Classification not available — ensure text was extracted and the module is loaded.")
+        else:
+            cat = classification.get("category", "Other")
+            conf = classification.get("confidence", 0.0)
+            lang = classification.get("language", "Unknown")
+            key_topics = classification.get("key_topics") or []
+            date_mentioned = classification.get("date_mentioned")
+            author = classification.get("author")
+            color = CATEGORY_COLORS.get(cat, "#BDC3C7")
+
+            # Category card
+            st.markdown(
+                f'<div style="background:{color};padding:18px 24px;border-radius:10px;'
+                f'margin-bottom:16px">'
+                f'<span style="font-size:1.6rem;font-weight:bold;color:#111">{cat}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Metrics row
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Confidence", f"{conf:.0%}")
+            col2.metric("Language", lang)
+            col3.metric("Author / Org", author or "—")
+
+            # Confidence bar
+            st.progress(float(conf))
+
+            # Key topics
+            if key_topics:
+                st.markdown("**Key Topics**")
+                chips_html = " ".join(
+                    f'<span style="background:#e8e8e8;padding:3px 10px;border-radius:4px;'
+                    f'margin:2px;display:inline-block">{t}</span>'
+                    for t in key_topics
+                )
+                st.markdown(chips_html, unsafe_allow_html=True)
+
+            # Extra metadata
+            if date_mentioned:
+                st.markdown(f"**Prominent date:** {date_mentioned}")
+
+            # All categories comparison (heuristic scores not available via Claude path,
+            # but we can show the current category highlighted)
+            with st.expander("📋 All categories"):
+                for c in CATEGORY_COLORS:
+                    marker = "✅" if c == cat else "·"
+                    bg = CATEGORY_COLORS[c]
+                    st.markdown(
+                        f'{marker} <span style="background:{bg};padding:2px 8px;'
+                        f'border-radius:3px;font-size:0.85rem">{c}</span>',
+                        unsafe_allow_html=True,
+                    )
+
+            # Download classification JSON
+            st.download_button(
+                "⬇️ Download classification JSON",
+                json.dumps(classification, indent=2),
+                file_name=f"{os.path.splitext(uploaded_file.name)[0]}_classification.json",
+                mime="application/json",
+            )
+
+    with tabs[6]:
         st.subheader("Chat with this Document")
         _render_chat(extracted_text, uploaded_file.name, search)
 
-    with tabs[5]:
+    with tabs[7]:
         st.subheader("JSON Output")
         json_output = {
             "source_filename": uploaded_file.name,
@@ -685,6 +965,7 @@ def main() -> None:
             "key_phrases": key_phrases,
             "tables": layout.get("tables"),
             "summary": summary_text,
+            "classification": classification,
             "donut": donut_result,
         }
         st.json(json_output)
