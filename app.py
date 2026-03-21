@@ -126,7 +126,6 @@ def _require_imports() -> bool:
 
 def _render_chat(text: str, doc_title: str, search) -> None:
     """Render a chat interface for Q&A over a document's text."""
-    import numpy as np
 
     if not text or not text.strip():
         st.info("No text available to chat about.")
@@ -162,15 +161,26 @@ def _render_chat(text: str, doc_title: str, search) -> None:
 
     # Display chat history
     for msg in st.session_state[hist_key]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        role_icon = "🧑" if msg["role"] == "user" else "🤖"
+        st.markdown(f"**{role_icon} {msg['role'].title()}:**\n\n{msg['content']}")
+        st.markdown("---")
 
-    # Chat input
-    if question := st.chat_input("Ask a question about this document…"):
-        # Show user message
+    # Chat input using text_input + button (works inside tabs unlike st.chat_input)
+    input_key = f"chat_input_{doc_title}"
+    col_input, col_btn = st.columns([5, 1])
+    with col_input:
+        question = st.text_input(
+            "Ask a question about this document",
+            key=input_key,
+            placeholder="e.g. What are the main findings?",
+        )
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        ask_clicked = st.button("Ask", key=f"ask_{doc_title}")
+
+    if ask_clicked and question and question.strip():
+        # Add user message to history
         st.session_state[hist_key].append({"role": "user", "content": question})
-        with st.chat_message("user"):
-            st.markdown(question)
 
         # Retrieve relevant chunks
         with st.spinner("Thinking…"):
@@ -184,28 +194,29 @@ def _render_chat(text: str, doc_title: str, search) -> None:
                 question,
                 context_texts,
                 doc_titles=[doc_title],
-                chat_history=st.session_state[hist_key][:-1],  # exclude the just-added user msg
+                chat_history=st.session_state[hist_key][:-1],
             )
 
-        # Show assistant message
+        # Add assistant response to history
         st.session_state[hist_key].append({"role": "assistant", "content": response})
-        with st.chat_message("assistant"):
-            st.markdown(response)
+
+        # Display answer
+        st.markdown(f"**🤖 Assistant:**\n\n{response}")
 
         # Show source chunks in expander
-        with st.expander("Source excerpts used"):
+        with st.expander("📎 Source excerpts used"):
             for i, c in enumerate(top_chunks):
                 score = c.get("score")
-                label = f"Excerpt {i+1}"
+                label = f"**Excerpt {i+1}**"
                 if score is not None:
                     label += f" (relevance: {score:.3f})"
-                st.caption(label)
+                st.markdown(label)
                 st.text(c["text"][:500])
                 st.markdown("---")
 
     # Clear chat button
     if st.session_state[hist_key]:
-        if st.button("Clear chat history", key=f"clear_{doc_title}"):
+        if st.button("🗑️ Clear chat history", key=f"clear_{doc_title}"):
             st.session_state[hist_key] = []
             st.rerun()
 
