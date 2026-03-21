@@ -7,10 +7,14 @@ from .storage import DocumentStorage
 from .utils import ensure_dir, file_hash
 from .diff import diff_markdown, side_by_side_diff
 
-# These modules now have built-in lightweight fallbacks and are always importable
+# These modules have built-in lightweight fallbacks and are always importable
 from .nlp import extract_entities, extract_key_phrases
 from .summarize import summarize_text
 from .search import SemanticSearch
+
+# RAG and classification (always importable, degrade gracefully without API key)
+from .rag import chunk_text, embed_chunks, retrieve_chunks, answer_question
+from .classifier import classify_document, CATEGORIES, CATEGORY_COLORS
 
 # Optional heavy features (require transformers)
 try:
@@ -36,6 +40,13 @@ __all__ = [
     "extract_key_phrases",
     "summarize_text",
     "SemanticSearch",
+    "chunk_text",
+    "embed_chunks",
+    "retrieve_chunks",
+    "answer_question",
+    "classify_document",
+    "CATEGORIES",
+    "CATEGORY_COLORS",
     "extract_with_donut",
     "trocr_ocr",
 ]

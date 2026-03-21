@@ -22,6 +22,10 @@ try:
         summarize_text,
         file_hash,
         ensure_dir,
+        chunk_text,
+        embed_chunks,
+        retrieve_chunks,
+        answer_question,
     )
 
     try:
@@ -48,6 +52,10 @@ except Exception as e:
     ensure_dir = None               # type: ignore
     extract_with_donut = None       # type: ignore
     trocr_ocr = None                # type: ignore
+    chunk_text = None               # type: ignore
+    embed_chunks = None             # type: ignore
+    retrieve_chunks = None          # type: ignore
+    answer_question = None          # type: ignore
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -114,6 +122,120 @@ def _require_imports() -> bool:
         _render_import_error()
         return False
     return True
+
+
+def _render_chat(text: str, doc_title: str, search) -> None:
+    """Render a chat interface for Q&A over a document's text."""
+    import numpy as np
+
+    if not text or not text.strip():
+        st.info("No text available to chat about.")
+        return
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        st.info(
+            "Set the **ANTHROPIC_API_KEY** environment variable to enable AI-powered Q&A.  \n"
+            "Without it, a keyword-match fallback will be used."
+        )
+
+    # Build chunks + embeddings (cached in session state per document)
+    cache_key = f"chat_chunks_{doc_title}"
+    emb_key = f"chat_embs_{doc_title}"
+    hist_key = f"chat_history_{doc_title}"
+
+    if cache_key not in st.session_state:
+        with st.spinner("Preparing document for chat (chunking + embedding)…"):
+            chunks = chunk_text(text, chunk_size=400, overlap=60)
+            st.session_state[cache_key] = chunks
+            if search is not None:
+                embs = embed_chunks(chunks, search)
+                st.session_state[emb_key] = embs
+            else:
+                st.session_state[emb_key] = None
+
+    chunks = st.session_state[cache_key]
+    chunk_embs = st.session_state.get(emb_key)
+
+    if hist_key not in st.session_state:
+        st.session_state[hist_key] = []
+
+    # Display chat history
+    for msg in st.session_state[hist_key]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input
+    if question := st.chat_input("Ask a question about this document…"):
+        # Show user message
+        st.session_state[hist_key].append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        # Retrieve relevant chunks
+        with st.spinner("Thinking…"):
+            top_chunks = retrieve_chunks(
+                question, chunks, chunk_embs, search, top_k=5,
+            )
+            context_texts = [c["text"] for c in top_chunks]
+
+            # Get answer
+            response = answer_question(
+                question,
+                context_texts,
+                doc_titles=[doc_title],
+                chat_history=st.session_state[hist_key][:-1],  # exclude the just-added user msg
+            )
+
+        # Show assistant message
+        st.session_state[hist_key].append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
+
+        # Show source chunks in expander
+        with st.expander("Source excerpts used"):
+            for i, c in enumerate(top_chunks):
+                score = c.get("score")
+                label = f"Excerpt {i+1}"
+                if score is not None:
+                    label += f" (relevance: {score:.3f})"
+                st.caption(label)
+                st.text(c["text"][:500])
+                st.markdown("---")
+
+    # Clear chat button
+    if st.session_state[hist_key]:
+        if st.button("Clear chat history", key=f"clear_{doc_title}"):
+            st.session_state[hist_key] = []
+            st.rerun()
+
+
+def _render_stored_docs_chat(storage, search) -> None:
+    """Render a chat interface for Q&A over stored documents."""
+    docs = storage.list_documents()
+    if not docs:
+        st.info("No stored documents. Upload and save a document first.")
+        return
+
+    doc_options = {f"{d['id']}: {d.get('title') or d.get('filename')}": d for d in docs}
+    selected = st.multiselect(
+        "Select document(s) to chat with",
+        list(doc_options.keys()),
+        max_selections=5,
+        help="Select up to 5 documents for multi-document Q&A",
+    )
+
+    if not selected:
+        st.info("Select one or more documents above to start chatting.")
+        return
+
+    # Combine text from selected docs
+    selected_docs = [doc_options[s] for s in selected]
+    combined_text = "\n\n".join(d.get("text", "") for d in selected_docs)
+    doc_titles = [d.get("title") or d.get("filename") for d in selected_docs]
+    combined_title = " + ".join(doc_titles)
+
+    _render_chat(combined_text, f"stored_{combined_title}", search)
 
 
 def _build_query_text(extracted: dict) -> str:
@@ -472,7 +594,7 @@ def main() -> None:
 
     # ── results tabs ──
     st.header("📊 Extraction Results")
-    tabs = st.tabs(["📝 Text", "💡 Summary", "🏷️ Entities", "📋 Tables", "🔧 JSON"])
+    tabs = st.tabs(["📝 Text", "💡 Summary", "🏷️ Entities", "📋 Tables", "💬 Chat", "🔧 JSON"])
 
     with tabs[0]:
         st.subheader("Extracted Text")
@@ -540,6 +662,10 @@ def main() -> None:
                 )
 
     with tabs[4]:
+        st.subheader("Chat with this Document")
+        _render_chat(extracted_text, uploaded_file.name, search)
+
+    with tabs[5]:
         st.subheader("JSON Output")
         json_output = {
             "source_filename": uploaded_file.name,
@@ -636,6 +762,12 @@ def main() -> None:
                                 st.markdown(f"**Summary:** {r.get('summary')}")
                 else:
                     st.warning("No searchable documents found.")
+
+    # ── chat with stored documents ──
+    st.markdown("---")
+    st.subheader("💬 Chat with Stored Documents")
+    st.caption("Select saved documents and ask questions — powered by RAG + Claude")
+    _render_stored_docs_chat(storage, search)
 
     # ── compare / merge ──
     st.sidebar.markdown("---")
