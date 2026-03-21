@@ -1,24 +1,18 @@
 """Document Intelligence core package."""
 
-# Core (lightweight) components
+# Core components — always available
 from .ocr import ocr_image, ocr_pdf
 from .parser import parse_layout
 from .storage import DocumentStorage
 from .utils import ensure_dir, file_hash
 from .diff import diff_markdown, side_by_side_diff
 
-# Optional/extra features (may be unavailable if dependencies are missing)
-try:
-    from .nlp import extract_entities, extract_key_phrases
-except ImportError:  # pragma: no cover
-    extract_entities = None  # type: ignore
-    extract_key_phrases = None  # type: ignore
+# These modules now have built-in lightweight fallbacks and are always importable
+from .nlp import extract_entities, extract_key_phrases
+from .summarize import summarize_text
+from .search import SemanticSearch
 
-try:
-    from .summarize import summarize_text
-except ImportError:  # pragma: no cover
-    summarize_text = None  # type: ignore
-
+# Optional heavy features (require transformers)
 try:
     from .donut import extract_with_donut
 except ImportError:  # pragma: no cover
@@ -28,11 +22,6 @@ try:
     from .trocr import trocr_ocr
 except ImportError:  # pragma: no cover
     trocr_ocr = None  # type: ignore
-
-try:
-    from .search import SemanticSearch
-except ImportError:  # pragma: no cover
-    SemanticSearch = None  # type: ignore
 
 __all__ = [
     "ocr_image",
@@ -46,7 +35,7 @@ __all__ = [
     "extract_entities",
     "extract_key_phrases",
     "summarize_text",
+    "SemanticSearch",
     "extract_with_donut",
     "trocr_ocr",
-    "SemanticSearch",
 ]

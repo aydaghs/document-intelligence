@@ -2,37 +2,57 @@ from __future__ import annotations
 
 import logging
 import pickle
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:  # pragma: no cover
-    SentenceTransformer = None
-
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 _LOG = logging.getLogger(__name__)
 
+try:
+    from sentence_transformers import SentenceTransformer
+    _HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:  # pragma: no cover
+    SentenceTransformer = None  # type: ignore
+    _HAS_SENTENCE_TRANSFORMERS = False
+
 
 class SemanticSearch:
-    """Semantic search support using sentence-transformers embeddings."""
+    """Semantic search using sentence-transformers when available, TF-IDF otherwise."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        if SentenceTransformer is None:
-            raise ImportError(
-                "sentence-transformers is not installed. "
-                "Install it to enable semantic search."
-            )
-        self.model_name = model_name
-        self.model = SentenceTransformer(model_name)
+        self._use_transformers = False
+        self._model = None
+        self._tfidf: Optional[TfidfVectorizer] = None
+
+        if _HAS_SENTENCE_TRANSFORMERS:
+            try:
+                self._model = SentenceTransformer(model_name)
+                self._use_transformers = True
+                _LOG.info("SemanticSearch: using sentence-transformers (%s)", model_name)
+            except Exception as exc:
+                _LOG.warning("sentence-transformers load failed (%s); falling back to TF-IDF", exc)
+
+        if not self._use_transformers:
+            _LOG.info("SemanticSearch: using TF-IDF fallback (scikit-learn)")
+
+    @property
+    def backend(self) -> str:
+        return "sentence-transformers" if self._use_transformers else "tfidf"
 
     def embed(self, texts: List[str]) -> np.ndarray:
-        return self.model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        if self._use_transformers and self._model is not None:
+            return self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        # TF-IDF fallback: fit on these texts + return dense vectors
+        vec = TfidfVectorizer(max_features=512, sublinear_tf=True)
+        mat = vec.fit_transform(texts).toarray().astype(np.float32)
+        # L2-normalize
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return mat / norms
 
     def similarity(self, query_embedding: np.ndarray, candidate_embeddings: np.ndarray) -> np.ndarray:
-        # cosine_similarity expects 2D arrays
         return cosine_similarity(query_embedding.reshape(1, -1), candidate_embeddings).reshape(-1)
 
     def search(
@@ -42,18 +62,25 @@ class SemanticSearch:
         candidate_embeddings: np.ndarray,
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Return the top-K most similar candidate dicts (expects candidate_embeddings aligned)."""
-
-        if len(candidates) == 0:
+        if not candidates:
             return []
 
-        q_emb = self.embed([query_text])[0]
+        if self._use_transformers and self._model is not None:
+            q_emb = self._model.encode([query_text], convert_to_numpy=True, normalize_embeddings=True)[0]
+        else:
+            # TF-IDF: fit on all candidate texts + query together so vocabulary matches
+            corpus = [c.get("text", "") for c in candidates] + [query_text]
+            vec = TfidfVectorizer(max_features=512, sublinear_tf=True)
+            mat = vec.fit_transform(corpus).toarray().astype(np.float32)
+            norms = np.linalg.norm(mat, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            mat = mat / norms
+            candidate_embeddings = mat[:-1]
+            q_emb = mat[-1]
+
         scores = self.similarity(q_emb, candidate_embeddings)
         ranked = sorted(enumerate(scores), key=lambda iv: iv[1], reverse=True)
-        results: List[Dict[str, Any]] = []
-        for idx, score in ranked[:top_k]:
-            results.append({"score": float(score), **candidates[idx]})
-        return results
+        return [{"score": float(scores[i]), **candidates[i]} for i, _ in ranked[:top_k]]
 
     @staticmethod
     def deserialize_embedding(blob: bytes) -> np.ndarray:
