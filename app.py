@@ -2,7 +2,7 @@ import difflib
 import io
 import json
 import os
-import tempfile
+import re
 import traceback
 from typing import Callable, Optional
 
@@ -14,6 +14,7 @@ try:
     from docintelligence import (
         DocumentStorage,
         extract_entities,
+        extract_key_phrases,
         ocr_image,
         ocr_pdf,
         parse_layout,
@@ -42,6 +43,7 @@ except Exception as e:
     IMPORT_ERROR = e
     DocumentStorage = None  # type: ignore
     extract_entities = None  # type: ignore
+    extract_key_phrases = None  # type: ignore
     ocr_image = None  # type: ignore
     ocr_pdf = None  # type: ignore
     parse_layout = None  # type: ignore
@@ -100,8 +102,6 @@ def _build_query_text(extracted: dict) -> str:
 def _highlight_query(text: str, query: str) -> str:
     if not query or not text:
         return text
-    # Simple case-insensitive highlight for query terms
-    import re
 
     def repl(match):
         return f"**{match.group(0)}**"
@@ -141,8 +141,6 @@ def _diff_text_html(a: str, b: str) -> str:
 def _diff_text_md(a: str, b: str) -> str:
     """Generate a markdown diff (diff syntax highlighting)."""
 
-    import difflib
-
     a_lines = a.splitlines()
     b_lines = b.splitlines()
     diff = list(difflib.unified_diff(a_lines, b_lines, lineterm=""))
@@ -162,7 +160,7 @@ def _process_and_store(
     skip_duplicates: bool,
     use_semantic_search: bool,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    title: str | None = None,
+    title: Optional[str] = None,
 ) -> dict:
     """Process a file (OCR + layout + embeddings) and save it to storage."""
 
@@ -555,11 +553,24 @@ def main() -> None:
             else:
                 st.info("No summary generated.")
 
-        with tabs[1]:
-            st.subheader("Detected Entities")
-            st.table(entities[:30])
-
         with tabs[2]:
+            st.subheader("Detected Entities")
+            if not entities:
+                st.info("No entities detected. Install spaCy and run `python -m spacy download en_core_web_sm` to enable NER.")
+            else:
+                st.caption(f"{len(entities)} entities found")
+                st.table(entities[:30])
+            key_phrases_list = []
+            if extract_key_phrases is not None:
+                try:
+                    key_phrases_list = extract_key_phrases(layout.get("text", ""))
+                except Exception:
+                    pass
+            if key_phrases_list:
+                st.subheader("Key Phrases")
+                st.write(", ".join(key_phrases_list[:40]))
+
+        with tabs[3]:
             st.subheader("Detected Tables")
             tables = layout.get("tables", [])
             if not tables:
@@ -575,7 +586,7 @@ def main() -> None:
                     mime="text/csv",
                 )
 
-        with tabs[3]:
+        with tabs[4]:
             st.subheader("JSON Output")
             json_output = {
                 "source_filename": uploaded_file.name,
@@ -626,7 +637,11 @@ def main() -> None:
 
         st.markdown("---")
         st.subheader("Search stored documents")
-        query_text = st.text_input("Search query", value="")
+        col_q, col_k = st.columns([4, 1])
+        with col_q:
+            query_text = st.text_input("Search query", value="")
+        with col_k:
+            top_k = st.number_input("Top K", min_value=1, max_value=20, value=5, step=1)
         if not use_semantic_search:
             st.info("Semantic search is disabled. Enable it in the sidebar to search stored documents.")
         elif search is None:
@@ -635,32 +650,43 @@ def main() -> None:
                 "Install sentence-transformers and restart to enable."
             )
         elif st.button("Search"):
-            docs = storage.get_documents_with_embeddings()
-            if not docs:
-                st.warning("No previously stored documents found. Save a document first.")
+            if not query_text.strip():
+                st.warning("Enter a search query first.")
             else:
-                candidate_embeddings = []
-                candidates = []
-                for d in docs:
-                    emb_blob = d.get("embedding")
-                    if emb_blob is None:
-                        continue
-                    candidate_embeddings.append(search.deserialize_embedding(emb_blob))
-                    candidates.append(d)
-                candidate_embeddings = list(candidate_embeddings)
-                if candidate_embeddings:
+                with st.spinner("Searching..."):
+                    docs_with_emb = storage.get_documents_with_embeddings()
+                if not docs_with_emb:
+                    st.warning("No previously stored documents found. Save a document first.")
+                else:
                     import numpy as np
 
-                    candidate_embeddings = np.vstack(candidate_embeddings)
-                    results = search.search(query_text, candidates, candidate_embeddings, top_k=5)
-                    for r in results:
-                        st.write(
-                            f"**{r.get('title') or r.get('filename')}** (score: {r.get('score'):.3f})"
-                        )
-                        snippet = r.get("text", "")[:500]
-                        st.markdown(_highlight_query(snippet, query_text))
-                else:
-                    st.warning("No document embeddings found. Please save a document with embedding.")
+                    candidate_embeddings = []
+                    candidates = []
+                    for d in docs_with_emb:
+                        emb_blob = d.get("embedding")
+                        if emb_blob is None:
+                            continue
+                        try:
+                            candidate_embeddings.append(search.deserialize_embedding(emb_blob))
+                            candidates.append(d)
+                        except Exception:
+                            pass
+                    if candidate_embeddings:
+                        candidate_embeddings = np.vstack(candidate_embeddings)
+                        results = search.search(query_text, candidates, candidate_embeddings, top_k=int(top_k))
+                        if not results:
+                            st.info("No matching documents found.")
+                        for rank, r in enumerate(results, start=1):
+                            with st.expander(
+                                f"#{rank} — {r.get('title') or r.get('filename')}  (score: {r.get('score', 0):.3f})"
+                            ):
+                                st.caption(f"ID: {r.get('id')} | Created: {r.get('created_at')}")
+                                snippet = r.get("text", "")[:600]
+                                st.markdown(_highlight_query(snippet, query_text))
+                                if r.get("summary"):
+                                    st.markdown(f"**Summary:** {r.get('summary')}")
+                    else:
+                        st.warning("No document embeddings found. Please save a document with embedding.")
 
     # Document comparison / change detection
     st.sidebar.markdown("---")
@@ -738,7 +764,14 @@ def main() -> None:
                         filter(None, [doc_a_data.get("summary", ""), doc_b_data.get("summary", "")])
                     )
                     new_title = f"Merged: {doc_a_data.get('title') or doc_a_data.get('filename')} + {doc_b_data.get('title') or doc_b_data.get('filename')}"
-                    emb = search.embed([merged_text])[0]
+                    emb = None
+                    emb_blob = None
+                    if search is not None:
+                        try:
+                            emb = search.embed([merged_text])[0]
+                            emb_blob = search.serialize_embedding(emb)
+                        except Exception:
+                            emb_blob = None
                     storage.add_document(
                         filename=new_title,
                         file_hash=None,
@@ -746,7 +779,7 @@ def main() -> None:
                         text=merged_text,
                         summary=merged_summary,
                         metadata={"merged_from": [doc_a_data["id"], doc_b_data["id"]]},
-                        embedding=search.serialize_embedding(emb),
+                        embedding=emb_blob,
                     )
                     st.success("Merged document created.")
             else:
@@ -758,12 +791,12 @@ def main() -> None:
     st.sidebar.subheader("Database")
     st.sidebar.write(f"Stored documents: {len(docs)}")
     for d in docs[:10]:
-        st.sidebar.write(f"- {d.get('title') or d.get('filename')} ({d.get('created_at')})")
+        st.sidebar.write(f"- [{d['id']}] {d.get('title') or d.get('filename')} ({d.get('created_at')})")
 
     if st.sidebar.button("Export Excel report"):
         df = pd.DataFrame(docs)
-        # Keep only key fields for report
-        df = df[["id", "filename", "title", "file_hash", "summary", "created_at"]]
+        keep_cols = [c for c in ["id", "filename", "title", "file_hash", "summary", "created_at"] if c in df.columns]
+        df = df[keep_cols]
         buf = io.BytesIO()
         df.to_excel(buf, index=False, engine="openpyxl")
         buf.seek(0)
@@ -773,6 +806,18 @@ def main() -> None:
             file_name="document_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    if doc_options:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Delete a document")
+        del_choice = st.sidebar.selectbox("Select document to delete", doc_options, key="delete_doc")
+        if st.sidebar.button("Delete selected document"):
+            del_id = int(del_choice.split(":", 1)[0])
+            deleted = storage.delete_document(del_id)
+            if deleted:
+                st.sidebar.success(f"Deleted document {del_id}.")
+            else:
+                st.sidebar.error(f"Could not delete document {del_id}.")
 
 
 if __name__ == "__main__":

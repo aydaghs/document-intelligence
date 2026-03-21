@@ -10,3 +10,15 @@ openpyxl
 # Enable semantic search (sentence-transformers uses torch under the hood)
 sentence-transformers
 torch
+
+# OCR backends (at least one is required for image/scanned-PDF processing)
+easyocr
+pytesseract
+
+# Optional: NLP (named entity recognition, key phrase extraction)
+# spacy
+# Run after install: python -m spacy download en_core_web_sm
+
+# Optional: summarization, Donut layout parsing, TrOCR handwriting
+# transformers
+# accelerate

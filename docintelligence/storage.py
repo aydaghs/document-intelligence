@@ -183,5 +183,12 @@ class DocumentStorage:
             )
         return docs
 
+    def delete_document(self, doc_id: int) -> bool:
+        """Delete a document by ID. Returns True if a row was deleted."""
+        c = self.conn.cursor()
+        c.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        self.conn.commit()
+        return c.rowcount > 0
+
     def close(self) -> None:
         self.conn.close()
