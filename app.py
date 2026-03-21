@@ -380,7 +380,7 @@ def main() -> None:
         return
 
     st.title("📄 Document Intelligence")
-    st.caption("OCR · Layout Analysis · Entity Extraction · Semantic Search")
+    st.caption("OCR · Layout Analysis · Entity Extraction · Semantic Search · Chat Q&A")
 
     # ── sidebar ──
     st.sidebar.header("⚙️ Options")
