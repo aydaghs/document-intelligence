@@ -6,6 +6,12 @@ import re
 import traceback
 from typing import Callable, Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import pandas as pd
 import streamlit as st
 

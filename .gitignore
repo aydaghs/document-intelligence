@@ -4,5 +4,6 @@ __pycache__/
 *.pyd
 .env
 .env.*
+!.env.example
 .DS_Store
 data/
